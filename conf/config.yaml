@@ -1,0 +1,20 @@
+# config.yaml
+defaults:
+  - _self_
+
+env_name: "CartPole-v1"
+lr: 1e-3
+gamma: 0.99
+buffer_size: 10000
+batch_size: 64
+epsilon_decay: 1000
+target_update_freq: 200
+max_episodes: 200
+seed: 1  # 默认种子
+
+# MySQL 配置 
+db_config:
+  host: "localhost"
+  user: "rl_learner"
+  password: "rl_pass"
+  database: "rl_experiments"
