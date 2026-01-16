@@ -4,12 +4,14 @@ import torch.optim as optim
 import numpy as np
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
-from components.policy.DiscretePolicy import DiscretePolicy
+
+from components.policy.GaussianPolicy import GaussianPolicy
 from components.strategy.EpsilonGreedy import EpsilonGreedy
 from components.memory.ReplayBuffer import ReplayBuffer
-from components.updater.DQULearner import DQULearner
+from components.updater.SACLearner import SACLearner
 from utils.GeneralQVisualizer import GeneralQVisualizer
-from components.representation.QNetwork import QNetwork
+from components.representation.ContinuousQNetwork import ContinuousQNetwork
+
 import os
 import random
 from utils.ExperimentDB import ExperimentDB
@@ -33,24 +35,23 @@ class Runner:
         os.makedirs(self.vis_dir, exist_ok=True)
         
         # 3. 初始化 Representation (Model)
-        state_dim = np.prod(self.env.observation_space.shape)
-        action_dim = self.env.action_space.n
-        self.q_net = QNetwork(state_dim, action_dim).to(self.device)
-        self.target_net = QNetwork(state_dim, action_dim).to(self.device) # Target Policy 用
-        
+        state_dim = self.env.observation_space.shape[0]
+        action_dim = self.env.action_space.shape[0]
+        action_high = self.env.action_space.high[0]
+        q1 = ContinuousQNetwork(state_dim, action_dim).to(self.device)
+        q2 = ContinuousQNetwork(state_dim, action_dim).to(self.device)
+        target_q1 = ContinuousQNetwork(state_dim, action_dim).to(self.device)
+        target_q2 = ContinuousQNetwork(state_dim, action_dim).to(self.device)  
+
         # 4. 初始化组件
-        if self.cfg.algo_name == "DQN":
-            self.policy = DiscretePolicy(self.q_net, self.device)
-            self.explorer = EpsilonGreedy(decay=config['epsilon_decay'])
+        if self.cfg.algo_name == "SAC":
+            self.policy = GaussianPolicy(state_dim, action_dim, action_high, self.device).to(self.device)
             self.memory = ReplayBuffer(config['buffer_size'])
-            self.optimizer = optim.Adam(self.q_net.parameters(), lr=config['lr'])
-            self.learner = DQULearner(
-                model=self.q_net,
-                target_model=self.target_net,
-                optimizer=self.optimizer,
-                gamma=config['gamma'],
-                device=self.device
-            )
+            self.optimizer = optim.Adam(list(q1.parameters()) + list(q2.parameters()), lr=config['lr'])
+            self.policy_optimizer = optim.Adam(self.policy.parameters(), lr=config['lr'])
+            self.learner = SACLearner(q1, q2, self.policy, target_q1, target_q2, 
+                     self.optimizer, self.policy_optimizer, 
+                     config['gamma'], config['alpha'], self.device)
 
         # 5. 初始化日志记录器
         self.db = ExperimentDB(self.cfg.db_config) if "db_config" in self.cfg else None
@@ -74,11 +75,12 @@ class Runner:
                 
                 # --- A. Agent 决策 (Behavior Policy + Exploration) ---
                 # 1. Policy 给出建议
-                policy_action, _ = self.policy.get_action(state)
+                policy_action = self.policy.get_action(state)
                 # 2. Exploration 进行修饰
-                action, epsilon = self.explorer.select_action(
-                    policy_action, self.env.action_space, global_step
-                )
+                # action, epsilon = self.explorer.select_action(
+                #     policy_action, self.env.action_space, global_step
+                # )
+                action = policy_action  # 目前没有额外探索策略
                 
                 # --- B. 环境交互 ---
                 next_state, reward, terminated, truncated, _ = self.env.step(action)
@@ -98,7 +100,6 @@ class Runner:
                     if global_step % 100 == 0:
                         self.writer.add_scalar("losses/td_loss", loss, global_step)
                         self.writer.add_scalar("charts/mean_q", mean_q, global_step)
-                        self.writer.add_scalar("charts/epsilon", epsilon, global_step)
                     # mysql
                     episode_losses.append(loss)
                     episode_qs.append(mean_q)
@@ -113,7 +114,7 @@ class Runner:
             all_episode_rewards.append(episode_reward)
 
             # 2. 存入数据库：每轮记录一次
-            self.db.log_data(
+            self.db.log_metrics(
                 step_type="episode",
                 step=episode,
                 metrics={
@@ -126,11 +127,11 @@ class Runner:
             # --- Episode 结束后的记录与可视化 ---
             if (episode + 1) % 20 == 0:
                 self.writer.add_scalar("charts/episode_reward", episode_reward, global_step)
-                print(f"Episode {episode+1} | Step {global_step} | Reward: {episode_reward:.2f} | Epsilon: {epsilon:.3f}")
+                print(f"Episode {episode+1} | Step {global_step} | Reward: {episode_reward:.2f}")
             
-            # 每 100 个 Episode 画一次 Q 值地形图
-            if (episode + 1) % 100 == 0:
-                self.visualizer.plot(self.q_net, global_step, self.vis_dir)
+            # # 每 100 个 Episode 画一次 Q 值地形图
+            # if (episode + 1) % 100 == 0:
+            #     self.visualizer.plot(self.q_net, global_step, self.vis_dir)
 
         # 训练结束，更新最终状态到数据库
         final_reward = np.mean(all_episode_rewards[-10:]) # 最后10次平均

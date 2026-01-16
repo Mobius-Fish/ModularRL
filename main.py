@@ -1,4 +1,4 @@
-from Runner import Runner
+from RunnerContinuous import Runner
 from utils.GeneralQVisualizer import GeneralQVisualizer
 import hydra
 from omegaconf import DictConfig, OmegaConf
